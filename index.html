@@ -262,6 +262,11 @@
       <button type="button" data-source="census">2023 U.S. Census estimate</button>
       <button type="button" data-source="palestinian">2023 PCBS estimate (age bands)</button>
     </div>
+    <div class="source-toggle age-threshold-toggle">
+      <span class="source-toggle-label">Age of interest:</span>
+      <button type="button" data-age="16" class="active">16</button>
+      <button type="button" data-age="18">18</button>
+    </div>
     <div class="legend-row" id="rateLegend"></div>
 
     <div class="chart-card">
@@ -278,6 +283,16 @@
       <span class="source-toggle-label">Population source:</span>
       <button type="button" data-source="census">2023 U.S. Census estimate</button>
       <button type="button" data-source="palestinian">2023 PCBS estimate (age bands)</button>
+    </div>
+    <div class="source-toggle age-threshold-toggle">
+      <span class="source-toggle-label">Age of interest:</span>
+      <button type="button" data-age="16" class="active">16</button>
+      <button type="button" data-age="18">18</button>
+    </div>
+    <div class="source-toggle" id="popShowToggle">
+      <span class="source-toggle-label">Show:</span>
+      <button type="button" data-show="population" class="active">Population</button>
+      <button type="button" data-show="deaths" class="active">Violent deaths</button>
     </div>
     <div class="legend-row" id="popLegend"></div>
 
@@ -374,6 +389,9 @@ const DATA_SOURCES = {
 
 let currentSource = 'census';
 let currentTab = 'rate';
+let popShowPopulation = true;
+let popShowDeaths = true;
+let censusAgeThreshold = 16;
 let rateChart = null;
 let popChart = null;
 
@@ -450,8 +468,27 @@ function drawBand(ctx, chart, xLeft, xRight, yTop, yBottom, label1, label2, colo
 
 function sum(arr) { return arr.reduce((a, b) => a + b, 0); }
 
+function getThresholdConfig(sourceKey) {
+  const base = DATA_SOURCES[sourceKey];
+  if (sourceKey !== 'census') {
+    return { under: base.under, male: base.male };
+  }
+  const t = censusAgeThreshold;
+  return {
+    under: { legendLabel: `Under age ${t}`, legendText: `Both genders under age ${t}`, ageNum: t, start: 0, end: t - 1 },
+    male: {
+      legendLabel: `Males ages ${t}–45`,
+      boxLabel: `Male, ages ${t}–45`,
+      statLabel: `Male, ages ${t}–45 rate`,
+      start: t, end: 45
+    }
+  };
+}
+
 function computeDerived(sourceKey) {
-  const cfg = DATA_SOURCES[sourceKey];
+  const base = DATA_SOURCES[sourceKey];
+  const { under, male } = getThresholdConfig(sourceKey);
+  const cfg = { ...base, under, male };
   const raw = cfg.raw;
   const ages = raw.map(r => r[0]);
   const maleCount = raw.map(r => r[1]);
@@ -557,12 +594,20 @@ function renderRateLegend(d) {
 
 function renderPopLegend(d, underPct) {
   const el = document.getElementById('popLegend');
-  el.innerHTML = `
-    <div class="legend-item"><span class="swatch" style="background:var(--male); opacity:0.45"></span> Male population</div>
-    <div class="legend-item"><span class="swatch" style="background:var(--child)"></span> Violent deaths</div>
-    <div class="legend-item"><span class="swatch" style="background:var(--female); opacity:0.45"></span> Female population</div>
-    <div class="legend-item"><span class="swatch" style="background:rgba(192,41,74,0.35); border:1px dashed var(--child)"></span> ${d.cfg.under.legendText} (~${underPct.toFixed(0)}% of population)</div>
-  `;
+  const items = [];
+  if (popShowPopulation) {
+    items.push(`<div class="legend-item"><span class="swatch" style="background:var(--male); opacity:0.45"></span> Male population</div>`);
+  }
+  if (popShowDeaths) {
+    items.push(`<div class="legend-item"><span class="swatch" style="background:var(--child)"></span> Violent deaths</div>`);
+  }
+  if (popShowPopulation) {
+    items.push(`<div class="legend-item"><span class="swatch" style="background:var(--female); opacity:0.45"></span> Female population</div>`);
+  }
+  if (popShowPopulation) {
+    items.push(`<div class="legend-item"><span class="swatch" style="background:rgba(192,41,74,0.35); border:1px dashed var(--child)"></span> ${d.cfg.under.legendText} (~${underPct.toFixed(0)}% of population)</div>`);
+  }
+  el.innerHTML = items.join('\n');
 }
 
 function makeAgeTickCallback(ages) {
@@ -734,13 +779,24 @@ function renderRateStats(d, bands) {
 function renderPopChart(d) {
   if (popChart) { popChart.destroy(); popChart = null; }
 
-  const maleSurvivors = d.ages.map((age, i) => -(d.malePop[i] - d.maleCount[i]));
-  const maleDeathsSeg = d.ages.map((age, i) => -d.maleCount[i]);
-  const femaleSurvivors = d.ages.map((age, i) => d.femalePop[i] - d.femaleCount[i]);
-  const femaleDeathsSeg = d.ages.map((age, i) => d.femaleCount[i]);
+  // Bar composition depends on which layers are toggled on:
+  // both on       -> full population bar, with the death count shown as a highlighted cap
+  // population only -> full population bar, undifferentiated
+  // deaths only   -> just the death-count bar, scaled on its own
+  const maleBase = d.ages.map((age, i) => popShowPopulation ? (d.malePop[i] - (popShowDeaths ? d.maleCount[i] : 0)) : 0);
+  const maleDeathsSeg = d.ages.map((age, i) => popShowDeaths ? d.maleCount[i] : 0);
+  const femaleBase = d.ages.map((age, i) => popShowPopulation ? (d.femalePop[i] - (popShowDeaths ? d.femaleCount[i] : 0)) : 0);
+  const femaleDeathsSeg = d.ages.map((age, i) => popShowDeaths ? d.femaleCount[i] : 0);
 
-  const maxPop = Math.max(...d.malePop, ...d.femalePop);
-  const axisMax = Math.ceil(maxPop / 1000) * 1000;
+  const maleSurvivors = maleBase.map(v => -v);
+  const maleDeathsSegNeg = maleDeathsSeg.map(v => -v);
+
+  const effectiveMax = Math.max(
+    ...d.ages.map((age, i) => popShowPopulation ? d.malePop[i] : maleDeathsSeg[i]),
+    ...d.ages.map((age, i) => popShowPopulation ? d.femalePop[i] : femaleDeathsSeg[i])
+  );
+  const step = effectiveMax >= 10000 ? 1000 : effectiveMax >= 1000 ? 500 : effectiveMax >= 100 ? 50 : 10;
+  const axisMax = Math.max(step, Math.ceil(effectiveMax / step) * step);
 
   const underEndIdx = d.ages.indexOf(d.cfg.under.end);
   let popBandCum = 0;
@@ -754,6 +810,7 @@ function renderPopChart(d) {
   const popBandPlugin = {
     id: 'popBandPlugin',
     afterDatasetsDraw(chart) {
+      if (!popShowPopulation) return;
       const { ctx, scales } = chart;
       const yScale = scales.y;
       const xScale = scales.x;
@@ -787,7 +844,7 @@ function renderPopChart(d) {
         },
         {
           label: 'Male violent deaths',
-          data: maleDeathsSeg,
+          data: maleDeathsSegNeg,
           backgroundColor: childColor,
           stack: 'all',
           borderRadius: 1,
@@ -796,7 +853,7 @@ function renderPopChart(d) {
         },
         {
           label: 'Female population',
-          data: femaleSurvivors,
+          data: femaleBase,
           backgroundColor: hexToRgba(femaleColor, 0.45),
           stack: 'all',
           borderRadius: 1,
@@ -901,8 +958,27 @@ function renderPopStats(d) {
 }
 
 function updateToggleButtons() {
-  document.querySelectorAll('.source-toggle button').forEach(btn => {
+  document.querySelectorAll('.source-toggle button[data-source]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.source === currentSource);
+  });
+  updateShowToggleButtons();
+  updateAgeThresholdToggle();
+}
+
+function updateAgeThresholdToggle() {
+  const isCensus = currentSource === 'census';
+  document.querySelectorAll('.age-threshold-toggle').forEach(el => {
+    el.style.display = isCensus ? '' : 'none';
+  });
+  document.querySelectorAll('.age-threshold-toggle button').forEach(btn => {
+    btn.classList.toggle('active', Number(btn.dataset.age) === censusAgeThreshold);
+  });
+}
+
+function updateShowToggleButtons() {
+  document.querySelectorAll('#popShowToggle button').forEach(btn => {
+    const isPop = btn.dataset.show === 'population';
+    btn.classList.toggle('active', isPop ? popShowPopulation : popShowDeaths);
   });
 }
 
@@ -915,11 +991,34 @@ function renderAll() {
   updateToggleButtons();
 }
 
-document.querySelectorAll('.source-toggle button').forEach(btn => {
+document.querySelectorAll('.source-toggle button[data-source]').forEach(btn => {
   btn.addEventListener('click', () => {
     if (btn.dataset.source === currentSource) return;
     currentSource = btn.dataset.source;
     renderAll();
+  });
+});
+
+document.querySelectorAll('.age-threshold-toggle button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (currentSource !== 'census') return;
+    const v = Number(btn.dataset.age);
+    if (v === censusAgeThreshold) return;
+    censusAgeThreshold = v;
+    renderAll();
+  });
+});
+
+document.querySelectorAll('#popShowToggle button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const isPop = btn.dataset.show === 'population';
+    const turningOff = isPop ? popShowPopulation : popShowDeaths;
+    // keep at least one layer visible
+    if (turningOff && (isPop ? !popShowDeaths : !popShowPopulation)) return;
+    if (isPop) { popShowPopulation = !popShowPopulation; }
+    else { popShowDeaths = !popShowDeaths; }
+    updateShowToggleButtons();
+    renderPopChart(computeDerived(currentSource));
   });
 });
 
